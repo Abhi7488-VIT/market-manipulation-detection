@@ -21,7 +21,6 @@ Real-time market manipulation detection dashboard that combines **Isolation Fore
 - [Usage](#-usage)
 - [Project Structure](#-project-structure)
 - [Configuration](#-configuration)
-- [Screenshots](#-screenshots)
 - [How It Works](#-how-it-works)
 - [License](#-license)
 
@@ -208,12 +207,6 @@ NEWS_STRONG_THRESHOLD = 0.35     # |compound| above this = strong signal
 SCORE_SUSPICIOUS = 40            # score ≥ 40 → Suspicious
 SCORE_HIGH_RISK  = 65            # score ≥ 65 → High Risk
 ```
-
----
-
-## 🖼️ Screenshots
-
-> *Run the app locally to see the full interactive dashboard with candlestick charts, manipulation gauge, breadth analysis, VIX monitoring, and sentiment breakdown.*
 
 ---
 
