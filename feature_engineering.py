@@ -113,15 +113,25 @@ def compute_stock_signal(
 
 def compute_market_breadth(
     constituent_dfs: dict,
+    index_df: pd.DataFrame | None = None,
     price_threshold: float = utils.PRICE_CHANGE_THRESHOLD,
 ) -> dict:
     """
     Compute market breadth as the fraction of constituent stocks that moved
     significantly (|price_change| >= threshold) in the latest session.
 
+    Low breadth on its own is NOT suspicious — on a quiet session nothing moves
+    and breadth is legitimately near zero. What matters for surveillance is a
+    NARROW MOVE: the index itself moved materially while only a handful of
+    constituents participated, i.e. the index was dragged by a few names.
+    That combination is what this layer scores.
+
     Parameters
     ----------
     constituent_dfs : dict  {ticker: pd.DataFrame}
+    index_df        : pd.DataFrame | None  index OHLCV (NIFTY). When omitted the
+                      layer cannot distinguish a quiet market from a narrow move
+                      and stays in its low-signal branch.
     price_threshold : float  movement threshold %
 
     Returns
@@ -130,7 +140,9 @@ def compute_market_breadth(
         breadth_ratio        (float, 0-1)  fraction of stocks moving
         movers               (list[str])   tickers that moved
         non_movers           (list[str])
-        low_breadth          (bool)
+        low_breadth          (bool)  raw breadth below threshold
+        index_move_pct       (float) 1-day index move %
+        narrow_move          (bool)  index moved AND breadth was low
         index_signal         (float, 0-100)
         anomaly_flags        (list[str])
     """
@@ -149,15 +161,34 @@ def compute_market_breadth(
     breadth_ratio = len(movers) / total if total > 0 else 0.0
     low_breadth   = breadth_ratio < utils.BREADTH_LOW_THRESHOLD
 
-    # Score: low breadth = high suspicion
-    # If only 1 stock out of 5 moves → high index signal
-    index_signal = (1 - breadth_ratio) * 100 if low_breadth else breadth_ratio * 40
+    # Did the index itself move enough for participation to be meaningful?
+    if index_df is not None and not index_df.empty:
+        index_move = compute_price_change(index_df, window=1)
+    else:
+        index_move = 0.0
+    index_moved = abs(index_move) >= utils.INDEX_MOVE_THRESHOLD
+
+    narrow_move = index_moved and low_breadth
+
+    if narrow_move:
+        # Index moved on thin participation → concentration is the signal.
+        index_signal = (1 - breadth_ratio) * 100
+    else:
+        # Quiet market, or a broad move with healthy participation.
+        # Churn contributes a mild baseline; a flat, still market scores ~0.
+        index_signal = breadth_ratio * 40
 
     flags = []
-    if low_breadth:
+    if narrow_move:
         flags.append(
-            f"Low market breadth: only {len(movers)}/{total} stocks moved "
-            f"≥{price_threshold}% (index may be driven by few stocks)"
+            f"Narrow index move: NIFTY moved {index_move:+.2f}% but only "
+            f"{len(movers)}/{total} stocks moved ≥{price_threshold}% "
+            f"(index driven by few stocks)"
+        )
+    elif low_breadth and not index_moved:
+        flags.append(
+            f"Quiet session: index flat ({index_move:+.2f}%) and only "
+            f"{len(movers)}/{total} stocks moved ≥{price_threshold}% — benign"
         )
 
     return {
@@ -165,6 +196,8 @@ def compute_market_breadth(
         "movers":         movers,
         "non_movers":     non_movers,
         "low_breadth":    low_breadth,
+        "index_move_pct": round(index_move, 3),
+        "narrow_move":    narrow_move,
         "index_signal":   round(index_signal, 2),
         "anomaly_flags":  flags,
     }
