@@ -9,6 +9,10 @@ Real-time market manipulation detection dashboard that combines **Isolation Fore
 ![scikit-learn](https://img.shields.io/badge/scikit--learn-1.3+-F7931E?logo=scikit-learn&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
+> 📘 **[PROJECT.md](PROJECT.md)** — a from-scratch walkthrough of the system: architecture,
+> the reasoning behind each design decision, the trade-offs accepted, a full data-flow
+> trace, known limitations, and 20 questions with answers.
+
 ---
 
 ## 📋 Table of Contents
