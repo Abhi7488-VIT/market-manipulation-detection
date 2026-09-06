@@ -96,10 +96,17 @@ PRICE_CHANGE_THRESHOLD   = 3.0  # % – price change beyond this is flagged
 VOLUME_SPIKE_THRESHOLD   = 2.0  # ratio – current vol / rolling avg
 VIX_SPIKE_THRESHOLD      = 1.5  # ratio – current VIX / rolling avg
 BREADTH_LOW_THRESHOLD    = 0.30 # fraction – <30% stocks moving = low breadth
+INDEX_MOVE_THRESHOLD     = 0.75 # % – index move above this makes breadth meaningful
 
 # ---------------------------------------------------------------------------
 # DETECTION WEIGHTS  (must sum to 1.0)
 # ---------------------------------------------------------------------------
+# Applied in detection.compute_manipulation_score():
+#   Stock layer      = Isolation Forest anomaly score (0-100)
+#   Index layer      = market-breadth / narrow-move signal (0-100)
+#   Derivative layer = India VIX spike signal (0-100)
+# The news sentiment layer is not a weighted term — it modulates the fused
+# score up or down as a context adjustment (see NEWS_* factors below).
 WEIGHT_STOCK      = 0.40
 WEIGHT_INDEX      = 0.30
 WEIGHT_DERIVATIVE = 0.30

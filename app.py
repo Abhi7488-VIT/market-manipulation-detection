@@ -906,7 +906,7 @@ def chart_nifty(nifty_df: pd.DataFrame, breadth: dict) -> go.Figure:
         labels=["Moved ≥3%", "Stable"],
         values=[moved, not_moved],
         hole=0.60,
-        marker=dict(colors=[COLOR_DOWN if breadth["low_breadth"] else COLOR_UP, "#0f172a"]),
+        marker=dict(colors=[COLOR_DOWN if breadth["narrow_move"] else COLOR_UP, "#0f172a"]),
         textfont=dict(size=10, color="#94a3b8"),
         showlegend=False,
     ), row=1, col=2)
@@ -1002,7 +1002,8 @@ def chart_gauge(score: float, label: str) -> go.Figure:
 
 
 def chart_layer_bars(s_sig: float, i_sig: float, v_sig: float) -> go.Figure:
-    layers = ["VIX Layer", "Index Layer", "Stock Layer"]
+    """Raw (pre-weight) 0-100 signal from each of the three fused layers."""
+    layers = ["VIX  ·  volatility", "Index  ·  breadth", "Stock  ·  ML anomaly"]
     vals   = [v_sig, i_sig, s_sig]
     colors = [_score_color(v) for v in vals]
 
@@ -1023,6 +1024,64 @@ def chart_layer_bars(s_sig: float, i_sig: float, v_sig: float) -> go.Figure:
     )
     fig.update_xaxes(range=[0, 120], gridcolor="#0f172a")
     fig.update_yaxes(gridcolor="rgba(0,0,0,0)")
+    return fig
+
+
+def chart_anomaly_heatmap(matrix: pd.DataFrame, top_n: int = 25) -> go.Figure:
+    """
+    Anomaly heatmap — NIFTY constituents (rows) x trading sessions (columns),
+    coloured by Isolation Forest anomaly score 0-100.
+
+    `matrix` comes from machine_learning.build_anomaly_matrix() and arrives
+    already ranked with the most anomalous stocks first, so we take the head.
+    """
+    if matrix is None or matrix.empty:
+        fig = go.Figure()
+        fig.update_layout(**PLOT_LAYOUT, height=300,
+                          title=dict(text="ANOMALY HEATMAP  ·  no data",
+                                     font=dict(size=9, color=TH_TEXT_MUTED), x=0))
+        return fig
+
+    m = matrix.head(top_n)
+    # Plotly draws the first row at the bottom — flip so rank 1 sits on top.
+    m = m.iloc[::-1]
+
+    # Normal (teal) → suspicious (amber, 40) → high risk (red, 65+)
+    colorscale = [
+        [0.00, "rgba(5,150,105,0.10)"],
+        [0.25, "rgba(5,150,105,0.45)"],
+        [0.40, COLOR_AMB],
+        [0.65, "#f97316"],
+        [1.00, COLOR_DOWN],
+    ]
+
+    fig = go.Figure(go.Heatmap(
+        z=m.values,
+        x=list(m.columns),
+        y=[t.replace(".NS", "") for t in m.index],
+        colorscale=colorscale,
+        zmin=0, zmax=100,
+        xgap=1, ygap=1,
+        hovertemplate="<b>%{y}</b><br>%{x}<br>Anomaly score: %{z:.1f} / 100<extra></extra>",
+        colorbar=dict(
+            title=dict(text="Score", font=dict(size=9, color=TH_TEXT_MUTED)),
+            tickvals=[0, 40, 65, 100],
+            ticktext=["0", "40", "65", "100"],
+            tickfont=dict(family="JetBrains Mono", size=9, color=TH_TEXT_DIM),
+            thickness=10, len=0.85, outlinewidth=0,
+        ),
+    ))
+    fig.update_layout(
+        **PLOT_LAYOUT,
+        height=max(360, len(m) * 20 + 120),
+        title=dict(
+            text=f"ANOMALY HEATMAP  ·  TOP {len(m)} OF {len(matrix)} STOCKS  ·  ISOLATION FOREST SCORE",
+            font=dict(size=9, color=TH_TEXT_MUTED, family="Inter"), x=0,
+        ),
+    )
+    fig.update_xaxes(showgrid=False, tickangle=-45, nticks=20)
+    fig.update_yaxes(showgrid=False,
+                     tickfont=dict(family="JetBrains Mono", size=9, color=TH_TEXT_DIM))
     return fig
 
 
@@ -1122,6 +1181,11 @@ with st.sidebar:
         value=f"{ticker.replace('.NS','').replace('.BO','')} stock India",
     )
 
+    st.markdown('<div style="height:12px"></div>', unsafe_allow_html=True)
+    heatmap_days = st.slider(
+        "HEATMAP WINDOW (SESSIONS)", min_value=10, max_value=60, value=30, step=5,
+        help="Trailing sessions scored for every NIFTY-50 constituent in the heatmap.",
+    )
     st.markdown('<div style="height:12px"></div>', unsafe_allow_html=True)
     demo_mode = st.checkbox("Simulate Anomaly (Stress Test ML)", value=False, help="Forces a massively volatile pseudo-day to trigger the Isolation Forest.")
     st.markdown('<div style="height:12px"></div>', unsafe_allow_html=True)
@@ -1300,6 +1364,25 @@ sr           = result["stock_result"]
 ir           = result["index_result"]
 vr           = result["vix_result"]
 nr           = result["news_result"]
+ml_score     = result["ml_score"]
+scoring      = result["scoring"]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ANOMALY MATRIX  —  every NIFTY-50 constituent scored across recent sessions
+# (leading underscores tell Streamlit not to hash the DataFrames themselves;
+#  `cache_key` carries the cheap invalidation signal instead)
+# ─────────────────────────────────────────────────────────────────────────────
+@st.cache_data(show_spinner=False, ttl=120)
+def _cached_anomaly_matrix(_constituent_dfs, _nifty_df, n_days, cache_key):
+    return machine_learning.build_anomaly_matrix(
+        _constituent_dfs, _nifty_df, n_days=n_days
+    )
+
+_hm_key = f"{period}|{len(constituent_dfs)}|{stock_df.index[-1]}|{heatmap_days}"
+with st.spinner(f"Scoring NIFTY-50 universe over {heatmap_days} sessions…"):
+    anomaly_matrix = _cached_anomaly_matrix(
+        constituent_dfs, nifty_df, heatmap_days, _hm_key
+    )
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ALERT STRIP
@@ -1337,7 +1420,7 @@ with k4:
          sub=f"avg {vr['rolling_avg']:.2f}  ×{vr['vix_spike']:.2f}", color=c)
 with k5:
     bpct = ir["breadth_ratio"] * 100
-    c = COLOR_DOWN if ir["low_breadth"] else COLOR_UP
+    c = COLOR_DOWN if ir["narrow_move"] else COLOR_UP
     _kpi("Breadth", f"{bpct:.0f}%",
          sub=f"{len(ir['movers'])} / {len(ir['movers'])+len(ir['non_movers'])} moved", color=c)
 with k6:
@@ -1352,8 +1435,8 @@ st.markdown('<div style="height:4px"></div>', unsafe_allow_html=True)
 # ─────────────────────────────────────────────────────────────────────────────
 # TABS
 # ─────────────────────────────────────────────────────────────────────────────
-t_markets, t_stock, t_index, t_vix, t_news, t_summary = st.tabs([
-    "MARKETS", "STOCK", "INDEX", "VIX", "NEWS", "SUMMARY",
+t_markets, t_heat, t_stock, t_index, t_vix, t_news, t_summary = st.tabs([
+    "MARKETS", "HEATMAP", "STOCK", "INDEX", "VIX", "NEWS", "SUMMARY",
 ])
 
 # ── MARKETS ───────────────────────────────────────────────────────────────
@@ -1392,6 +1475,64 @@ with t_markets:
     fig_idx.update_xaxes(showline=False, zeroline=False, gridcolor=TH_BORDER)
     fig_idx.update_yaxes(showline=False, zeroline=False, gridcolor=TH_BORDER)
     st.plotly_chart(fig_idx, use_container_width=True)
+
+# ── HEATMAP ──────────────────────────────────────────────────────────────
+with t_heat:
+    if anomaly_matrix is None or anomaly_matrix.empty:
+        st.warning("Not enough clean history to score the universe. Try a longer PERIOD.")
+    else:
+        latest_col    = anomaly_matrix.columns[-1]
+        latest_scores = anomaly_matrix[latest_col].dropna()
+        peak_scores   = anomaly_matrix.max(axis=1)
+
+        h1, h2, h3, h4 = st.columns(4)
+        with h1:
+            _kpi("Universe", f"{len(anomaly_matrix)}",
+                 sub="stocks scored", color=COLOR_DIM)
+        with h2:
+            _kpi("Sessions", f"{len(anomaly_matrix.columns)}",
+                 sub="trading days", color=COLOR_DIM)
+        with h3:
+            n_flag = int((latest_scores >= utils.SCORE_SUSPICIOUS).sum())
+            _kpi("Flagged Today", f"{n_flag}",
+                 sub=f"score ≥ {utils.SCORE_SUSPICIOUS}",
+                 color=COLOR_DOWN if n_flag else COLOR_UP)
+        with h4:
+            _kpi("Peak Score", f"{peak_scores.max():.1f}",
+                 sub=peak_scores.idxmax().replace(".NS", ""),
+                 color=_score_color(peak_scores.max()))
+
+        st.markdown('<div style="height:10px"></div>', unsafe_allow_html=True)
+        st.plotly_chart(chart_anomaly_heatmap(anomaly_matrix), use_container_width=True)
+
+        st.markdown('<div style="height:8px"></div>', unsafe_allow_html=True)
+        _section(f"RANKED WATCHLIST  ·  SESSION {latest_col}")
+
+        watch = pd.DataFrame({
+            "Ticker":       [t.replace(".NS", "") for t in anomaly_matrix.index],
+            "Latest Score": anomaly_matrix[latest_col].values,
+            "Peak Score":   peak_scores.values,
+            "Days ≥ 40":    (anomaly_matrix >= utils.SCORE_SUSPICIOUS).sum(axis=1).values,
+        })
+        watch = watch.sort_values("Latest Score", ascending=False).reset_index(drop=True)
+        watch.index += 1
+
+        st.dataframe(
+            watch.style.format({"Latest Score": "{:.1f}", "Peak Score": "{:.1f}"})
+                 .background_gradient(subset=["Latest Score"], cmap="OrRd", vmin=0, vmax=100),
+            use_container_width=True, height=360,
+        )
+
+        st.markdown(
+            f'<div style="font-size:0.70rem;color:{TH_TEXT_DIM};margin-top:8px;">'
+            f'Each row is one Isolation Forest fit on that stock\'s own '
+            f'{len(anomaly_matrix.columns)}-session feature history '
+            f'({", ".join(machine_learning.FEATURES)}), then every session scored '
+            f'against it. Scores are comparable along a row; across rows they '
+            f'rank relative isolation, not absolute manipulation probability.'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
 
 # ── STOCK ─────────────────────────────────────────────────────────────────
 with t_stock:
@@ -1453,10 +1594,10 @@ with t_index:
             ("Breadth Ratio",    f"{ir['breadth_ratio']*100:.0f}%",  "pct of NIFTY 50 moved"),
             ("Stocks Moved",     f"{len(ir['movers'])}",              f"of {len(ir['movers'])+len(ir['non_movers'])} total"),
             ("Index Signal",     f"{ir['index_signal']:.1f}",         "/ 100"),
-            ("Low Breadth Flag", "YES" if ir["low_breadth"] else "NO","< 30% threshold"),
+            ("Narrow Move Flag", "YES" if ir["narrow_move"] else "NO", "index moved, breadth thin"),
         ]
         for lbl, val, sub in rows_i:
-            c = COLOR_DOWN if (lbl == "Low Breadth Flag" and val == "YES") else TH_TEXT
+            c = COLOR_DOWN if (lbl == "Narrow Move Flag" and val == "YES") else TH_TEXT
             st.markdown(
                 f'<div style="display:flex;justify-content:space-between;align-items:baseline;'
                 f'padding:8px 0;border-bottom:1px solid {TH_BORDER};">'
@@ -1586,25 +1727,41 @@ with t_summary:
 
     with col_b:
         st.plotly_chart(chart_layer_bars(
-            sr["stock_signal"], ir["index_signal"], vr["vix_signal"]
+            ml_score, ir["index_signal"], vr["vix_signal"]
         ), use_container_width=True)
 
         st.markdown('<div style="height:6px"></div>', unsafe_allow_html=True)
-        _section("WEIGHT SCHEDULE")
-        for ly, wt in [("Stock Layer","40 %"),("Index Layer","30 %"),("VIX Layer","30 %")]:
+        _section("SCORE COMPOSITION")
+        contrib = scoring["contributions"]
+        rows = [
+            ("Stock Layer  (ML anomaly)", utils.WEIGHT_STOCK,      ml_score,           contrib["stock"]),
+            ("Index Layer  (breadth)",    utils.WEIGHT_INDEX,      ir["index_signal"], contrib["index"]),
+            ("VIX Layer  (volatility)",   utils.WEIGHT_DERIVATIVE, vr["vix_signal"],   contrib["derivative"]),
+        ]
+        for ly, wt, raw, pts in rows:
             st.markdown(
                 f'<div style="display:flex;justify-content:space-between;padding:5px 0;'
-                f'border-bottom:1px solid {TH_BORDER};font-size:0.76rem;">'
+                f'border-bottom:1px solid {TH_BORDER};font-size:0.74rem;">'
                 f'<span style="color:{TH_TEXT_DIM};">{ly}</span>'
-                f'<span style="font-family:JetBrains Mono,monospace;color:{TH_TEXT_MUTED};">{wt}</span>'
+                f'<span style="font-family:JetBrains Mono,monospace;color:{TH_TEXT_MUTED};">'
+                f'{raw:.1f} × {wt:.0%} = {pts:.1f}</span>'
                 f'</div>', unsafe_allow_html=True,
             )
-        news_adj = "−25%  (aligned news)" if nr["strong_signal"] and nr["mean_score"] > 0 and sr["price_change_pct"] > 0 else "+15%  (weak/no news)"
         st.markdown(
-            f'<div style="padding:5px 0;font-size:0.72rem;">'
+            f'<div style="display:flex;justify-content:space-between;padding:6px 0;'
+            f'border-bottom:1px solid {TH_BORDER};font-size:0.74rem;">'
+            f'<span style="color:{TH_TEXT_MUTED};">Weighted base</span>'
+            f'<span style="font-family:JetBrains Mono,monospace;color:{TH_TEXT};">'
+            f'{scoring["base_score"]:.1f}</span></div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            f'<div style="padding:6px 0;font-size:0.72rem;">'
             f'<span style="color:{TH_TEXT_MUTED};">News adjustment:</span>'
             f'<span style="font-family:JetBrains Mono,monospace;color:{TH_TEXT_DIM};margin-left:6px;">'
-            f'{news_adj}</span></div>',
+            f'× {scoring["news_multiplier"]:.2f}</span>'
+            f'<div style="color:{TH_TEXT_DIM};font-size:0.68rem;margin-top:3px;">'
+            f'{scoring["news_reason"]}</div></div>',
             unsafe_allow_html=True,
         )
 
